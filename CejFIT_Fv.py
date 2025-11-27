@@ -1,10 +1,10 @@
-import os, csv, sqlite3, tkinter as tk
+import os, sys, sqlite3, tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 from datetime import datetime
 
 try:
     from tkcalendar import DateEntry
-    TKCAL_AVAILABLE = True
+    TKCAL_AVAILABLE = True  
 except Exception:
     TKCAL_AVAILABLE = False
 
@@ -55,6 +55,7 @@ class DatabaseManager:
                 reps INTEGER NOT NULL,
                 rir INTEGER,
                 unit TEXT DEFAULT 'lbs',
+                notes TEXT DEFAULT '',
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             )
         ''')
@@ -62,12 +63,17 @@ class DatabaseManager:
 
     def ensure_columns(self):
         c = self.conn.cursor()
+        # add legacy columns if missing
         try:
             c.execute("ALTER TABLE sets ADD COLUMN rir INTEGER")
         except sqlite3.OperationalError:
             pass
         try:
             c.execute("ALTER TABLE sets ADD COLUMN unit TEXT DEFAULT 'lbs'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            c.execute("ALTER TABLE sets ADD COLUMN notes TEXT DEFAULT ''")
         except sqlite3.OperationalError:
             pass
         self.conn.commit()
@@ -126,12 +132,12 @@ class DatabaseManager:
         self.conn.commit()
         return c.lastrowid
 
-    def add_set(self, session_id, set_index, weight, reps, rir=None, unit='lbs'):
+    def add_set(self, session_id, set_index, weight, reps, rir=None, unit='lbs', notes=''):
         c = self.conn.cursor()
         c.execute(
-            'INSERT INTO sets (session_id, set_index, weight, reps, rir, unit) VALUES (?, ?, ?, ?, ?, ?)',
+            'INSERT INTO sets (session_id, set_index, weight, reps, rir, unit, notes) VALUES (?, ?, ?, ?, ?, ?, ?)',
             (session_id, set_index, float(weight), int(reps),
-             (int(rir) if rir is not None and str(rir).strip() != '' else None), unit))
+             (int(rir) if rir is not None and str(rir).strip() != '' else None), unit, (notes or '').strip()))
         self.conn.commit()
         return c.lastrowid
 
@@ -142,7 +148,7 @@ class DatabaseManager:
 
     def get_sets_for_session(self, session_id):
         c = self.conn.cursor()
-        c.execute('SELECT set_index, weight, reps, rir, unit FROM sets WHERE session_id=? ORDER BY set_index',
+        c.execute('SELECT set_index, weight, reps, rir, unit, notes FROM sets WHERE session_id=? ORDER BY set_index',
                   (session_id,))
         return c.fetchall()
 
@@ -358,11 +364,12 @@ class TrackerApp:
         self.q_reps = ttk.Entry(qr, width=6); self.q_reps.pack(side='left', padx=6)
         tk.Label(qr, text='RIR', bg=self.panel).pack(side='left')
         self.q_rir = ttk.Entry(qr, width=4); self.q_rir.pack(side='left', padx=(6,8))
+
         self._styled_btn(qr, "Add Set", self.add_set_from_quick).pack(side='left', padx=6)
 
         tk.Label(container, text="Sets", bg=self.panel, font=("Helvetica",10,"bold")).pack(anchor='w', pady=(8,4))
         self.sets_tree = ttk.Treeview(container, columns=('idx','weight','reps','rir','unit'), show='headings', height=5)
-        for c,h,w in [('idx','Set #',60), ('weight','Weight',100), ('reps','Rep Count',80), ('rir','RIR',60), ('unit','Unit',60)]:
+        for c,h,w in [('idx','Set #',60), ('weight','Weight',100), ('reps','Rep Count',80), ('rir','RIR',60), ('unit','Unit',60) ]:
             self.sets_tree.heading(c, text=h)
             self.sets_tree.column(c, width=w, anchor='center')
         self.sets_tree.pack(fill='both', expand=True)
@@ -375,13 +382,36 @@ class TrackerApp:
     # Bottom right UI
     def _build_right_bottom(self):
         tk.Label(self.right_bottom, text="Progress History", bg=self.panel, font=("Helvetica",11,"bold")).pack(anchor='w')
-        self.sessions_tree = ttk.Treeview(self.right_bottom, columns=('date','weight','reps','rir','notes'), show='headings', height=8)
-        specs = [('date','Session Date',120), ('weight','Weight',120), ('reps','Rep Count',80), ('rir','RIR',80), ('notes','Factor Notes',360)]
-        for col,text,w in specs:
+        # put treeview into its own frame so we can add scrollbars and prevent clipping
+        fr_sess = tk.Frame(self.right_bottom, bg=self.panel)
+        fr_sess.pack(fill='both', expand=True, pady=(6,8))
+
+        self.sessions_tree = ttk.Treeview(fr_sess, columns=('date','weight','reps','rir','notes'), show='headings', height=8)
+        specs = [
+            ('date', 'Session Date', 120),
+            ('weight', 'Weight', 120),
+            ('reps', 'Rep Count', 80),
+            ('rir', 'RIR', 80),
+            ('notes', 'Notes', 200)
+        ]
+        for col, text, w in specs:
             self.sessions_tree.heading(col, text=text)
-            anchor = 'w' if col == 'notes' else 'center'
-            self.sessions_tree.column(col, width=w, anchor=anchor)
-        self.sessions_tree.pack(fill='both', expand=True, pady=(6,8))
+            # Notes will automatically take remaining horizontal space; no horizontal scrollbar
+            if col == 'notes':
+                self.sessions_tree.column(col, anchor='center', stretch=True, width=1, minwidth=120)
+            else:
+                self.sessions_tree.column(col, width=w, anchor='center', stretch=False)
+
+        vbar = ttk.Scrollbar(fr_sess, orient='vertical', command=self.sessions_tree.yview)
+        hbar = ttk.Scrollbar(fr_sess, orient='horizontal', command=self.sessions_tree.xview)
+        self.sessions_tree.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
+
+        # grid layout to allow scrollbar to align correctly
+        self.sessions_tree.grid(row=0, column=0, sticky='nsew')
+        vbar.grid(row=0, column=1, sticky='ns')
+        hbar.grid(row=1, column=0, sticky='ew')
+        fr_sess.rowconfigure(0, weight=1); fr_sess.columnconfigure(0, weight=1)
+
         self.sessions_tree.bind('<<TreeviewSelect>>', self.on_session_select)
 
         bf = tk.Frame(self.right_bottom, bg=self.panel)
@@ -483,6 +513,7 @@ class TrackerApp:
                 rirdisp = f"{first[3] if first[3] is not None else ''}"
             else:
                 wdisp = rdisp = rirdisp = ''
+            # s is (id, date, notes)
             self.sessions_tree.insert('', 'end', iid=str(s[0]), values=(s[1], wdisp, rdisp, rirdisp, s[2] or ''))
         self.set_buffer.clear()
         for i in self.sets_tree.get_children():
@@ -561,7 +592,8 @@ class TrackerApp:
         sets = self.db.get_sets_for_session(sid)
         self.set_buffer = []
         for s in sets:
-            idx, weight, reps, rir, unit = s
+            # s may contain notes in DB but UI only uses first five fields
+            idx, weight, reps, rir, unit = s[0], s[1], s[2], s[3], s[4]
             self.sets_tree.insert('', 'end', values=(idx, weight, reps, rir if rir is not None else '', unit))
             self.set_buffer.append({'idx': idx, 'weight': weight, 'reps': reps, 'rir': rir, 'unit': unit})
 
@@ -592,7 +624,7 @@ class TrackerApp:
     def edit_exercise_dialog(self, event=None):
         sel = self.get_selected_exercise()
         if not sel:
-            messagebox.showinfo('Select', 'Select an exercise to edit.'); return
+            self.messagebox.showinfo('Select', 'Select an exercise to edit.'); return
         initial = {'name': sel[1], 'body_part': sel[2] or '', 'equipment': sel[3] or '',
                    'notes': sel[4] or '', 'subgroup': sel[5] or ''}
         d = ExerciseEditDialog(self.root, title='Edit Exercise', initial=initial)
